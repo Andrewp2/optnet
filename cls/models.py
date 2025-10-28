@@ -1,3 +1,5 @@
+import math
+
 import torch
 
 import torch.nn as nn
@@ -36,7 +38,7 @@ class Lenet(nn.Module):
                 return x
             self.projF = projF
         else:
-            self.projF = F.log_softmax
+            self.projF = lambda x: F.log_softmax(x, dim=1)
 
     def forward(self, x):
         nBatch = x.size(0)
@@ -89,7 +91,69 @@ class LenetOptNet(nn.Module):
         x = QPFunction()(Q, inputs, G, h, e, e)
         x = x[:,:10]
 
-        return F.log_softmax(x)
+        return F.log_softmax(x, dim=1)
+
+class LenetOptNetAttn(nn.Module):
+    def __init__(self, nHidden=50, nineq=200, neq=0, eps=1e-4, attnDim=64):
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, 20, kernel_size=5)
+        self.conv2 = nn.Conv2d(20, 50, kernel_size=5)
+
+        self.token_dim = 50
+        self.nTokens = 4*4
+        self.attnDim = attnDim
+
+        self.attn_q = nn.Linear(self.token_dim, attnDim)
+        self.attn_k = nn.Linear(self.token_dim, attnDim)
+        self.attn_v = nn.Linear(self.token_dim, attnDim)
+        self.attn_proj = nn.Linear(attnDim, self.token_dim)
+        self.attn_ln = nn.LayerNorm(self.token_dim)
+
+        self.qp_o = nn.Linear(self.token_dim*self.nTokens, nHidden)
+        self.qp_z0 = nn.Linear(self.token_dim*self.nTokens, nHidden)
+        self.qp_s0 = nn.Linear(self.token_dim*self.nTokens, nineq)
+
+        assert(neq==0)
+        self.M = Variable(torch.tril(torch.ones(nHidden, nHidden)).cuda())
+        self.L = Parameter(torch.tril(torch.rand(nHidden, nHidden).cuda()))
+        self.G = Parameter(torch.Tensor(nineq,nHidden).uniform_(-1,1).cuda())
+
+        self.nHidden = nHidden
+        self.nineq = nineq
+        self.neq = neq
+        self.eps = eps
+
+    def forward(self, x):
+        nBatch = x.size(0)
+
+        x = F.max_pool2d(self.conv1(x), 2)
+        x = F.max_pool2d(self.conv2(x), 2)
+
+        x = x.view(nBatch, self.token_dim, self.nTokens).permute(0, 2, 1)
+
+        q = self.attn_q(x)
+        k = self.attn_k(x)
+        v = self.attn_v(x)
+        attn_scores = torch.bmm(q, k.transpose(1, 2)) / math.sqrt(self.attnDim)
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_out = torch.bmm(attn_weights, v)
+        x = self.attn_ln(x + self.attn_proj(attn_out))
+
+        x = x.reshape(nBatch, -1)
+
+        L = self.M*self.L
+        Q = L.mm(L.t()) + self.eps*Variable(torch.eye(self.nHidden)).cuda()
+        Q = Q.unsqueeze(0).expand(nBatch, self.nHidden, self.nHidden)
+        G = self.G.unsqueeze(0).expand(nBatch, self.nineq, self.nHidden)
+        z0 = self.qp_z0(x)
+        s0 = self.qp_s0(x)
+        h = z0.mm(self.G.t())+s0
+        e = Variable(torch.Tensor())
+        inputs = self.qp_o(x)
+        x = QPFunction()(Q, inputs, G, h, e, e)
+        x = x[:,:10]
+
+        return F.log_softmax(x, dim=1)
 
 class FC(nn.Module):
     def __init__(self, nHidden, bn):
@@ -115,7 +179,7 @@ class FC(nn.Module):
         if self.bn:
             x = self.bn2(x)
         x = self.fc3(x)
-        return F.log_softmax(x)
+        return F.log_softmax(x, dim=1)
 
 class OptNet(nn.Module):
     def __init__(self, nFeatures, nHidden, nCls, bn, nineq=200, neq=0, eps=1e-4):
@@ -175,7 +239,7 @@ class OptNet(nn.Module):
         x = x.float()
         # x = x[:,:10].float()
 
-        return F.log_softmax(x)
+        return F.log_softmax(x, dim=1)
 
 class OptNetEq(nn.Module):
     def __init__(self, nFeatures, nHidden, nCls, neq, Qpenalty=0.1, eps=1e-4):
@@ -213,4 +277,4 @@ class OptNetEq(nn.Module):
         x = QPFunction(verbose=False)(Q, p.double(), G, h, A, b).float()
         x = self.fc2(x)
 
-        return F.log_softmax(x)
+        return F.log_softmax(x, dim=1)

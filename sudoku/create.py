@@ -21,8 +21,7 @@ plt.style.use('bmh')
 
 import sys
 from IPython.core import ultratb
-sys.excepthook = ultratb.FormattedTB(mode='Verbose',
-     color_scheme='Linux', call_pdb=1)
+sys.excepthook = ultratb.FormattedTB(mode='Verbose', call_pdb=1)
 
 def main():
     parser = argparse.ArgumentParser()

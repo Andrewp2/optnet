@@ -35,8 +35,7 @@ import models
 
 import sys
 from IPython.core import ultratb
-sys.excepthook = ultratb.FormattedTB(mode='Verbose',
-     color_scheme='Linux', call_pdb=1)
+sys.excepthook = ultratb.FormattedTB(mode='Verbose', call_pdb=1)
 
 def get_loaders(args):
     kwargs = {'num_workers': 1, 'pin_memory': True} if args.cuda else {}
@@ -97,6 +96,9 @@ def get_net(args):
         net = models.OptNet(28*28, args.nHidden, 10, args.bn, args.nineq)
     elif args.model == 'optnet-eq':
         net = models.OptNetEq(28*28, args.nHidden, 10, args.neq)
+    elif args.model == 'lenet-optnet-attn':
+        net = models.LenetOptNetAttn(
+            args.nHidden, args.nineq, attnDim=args.attnDim, eps=args.eps)
     else:
         assert(False)
 
@@ -145,6 +147,11 @@ def main():
     lenetOptnetP.add_argument('--nHidden', type=int, default=50)
     lenetOptnetP.add_argument('--nineq', type=int, default=100)
     lenetOptnetP.add_argument('--eps', type=float, default=1e-4)
+    lenetOptnetAttnP = subparsers.add_parser('lenet-optnet-attn')
+    lenetOptnetAttnP.add_argument('--nHidden', type=int, default=50)
+    lenetOptnetAttnP.add_argument('--nineq', type=int, default=100)
+    lenetOptnetAttnP.add_argument('--eps', type=float, default=1e-4)
+    lenetOptnetAttnP.add_argument('--attnDim', type=int, default=64)
     densenetP = subparsers.add_parser('densenet')
     fcP = subparsers.add_parser('fc')
     fcP.add_argument('--nHidden', type=int, default=500)
@@ -160,6 +167,10 @@ def main():
     args = parser.parse_args()
 
     args.cuda = not args.no_cuda and torch.cuda.is_available()
+    if not args.cuda:
+        raise RuntimeError(
+            'CUDA is not available. Training requires a GPU; rerun on a CUDA-enabled setup '
+            'or pass --no-cuda to acknowledge CPU execution.')
     if args.save is None:
         t = '{}.{}'.format(args.dataset, args.model)
         if args.model == 'lenet':
@@ -176,6 +187,9 @@ def main():
             t += '.nHidden:{}.neq:{}'.format(args.nHidden, args.neq)
         elif args.model == 'lenet-optnet':
             t += '.nHidden:{}.nineq:{}.eps:{}'.format(args.nHidden, args.nineq, args.eps)
+        elif args.model == 'lenet-optnet-attn':
+            t += '.nHidden:{}.nineq:{}.eps:{}.attnDim:{}'.format(
+                args.nHidden, args.nineq, args.eps, args.attnDim)
     setproctitle.setproctitle('bamos.'+t)
     args.save = os.path.join(args.work, t)
 
@@ -230,15 +244,15 @@ def train(args, epoch, net, trainLoader, optimizer, trainF):
         loss.backward()
         optimizer.step()
         nProcessed += len(data)
-        pred = output.data.max(1)[1] # get the index of the max log-probability
-        incorrect = pred.ne(target.data).cpu().sum()
+        pred = output.max(1)[1] # get the index of the max log-probability
+        incorrect = pred.ne(target).cpu().sum().item()
         err = 100.*incorrect/len(data)
         partialEpoch = epoch + batch_idx / len(trainLoader) - 1
         print('Train Epoch: {:.2f} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\tError: {:.6f}'.format(
             partialEpoch, nProcessed, nTrain, 100. * batch_idx / len(trainLoader),
-            loss.data[0], err))
+            loss.item(), err))
 
-        trainF.write('{},{},{}\n'.format(partialEpoch, loss.data[0], err))
+        trainF.write('{},{},{}\n'.format(partialEpoch, loss.item(), err))
         trainF.flush()
 
 def test(args, epoch, net, testLoader, optimizer, testF):
@@ -248,11 +262,11 @@ def test(args, epoch, net, testLoader, optimizer, testF):
     for data, target in testLoader:
         if args.cuda:
             data, target = data.cuda(), target.cuda()
-        data, target = Variable(data, volatile=True), Variable(target)
-        output = net(data)
-        test_loss += F.nll_loss(output, target).data[0]
-        pred = output.data.max(1)[1] # get the index of the max log-probability
-        incorrect += pred.ne(target.data).cpu().sum()
+        with torch.no_grad():
+            output = net(data)
+            test_loss += F.nll_loss(output, target).item()
+            pred = output.max(1)[1] # get the index of the max log-probability
+            incorrect += pred.ne(target).cpu().sum().item()
 
     test_loss = test_loss
     test_loss /= len(testLoader) # loss function already averages over batch size
